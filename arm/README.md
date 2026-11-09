@@ -1,7 +1,8 @@
 # Thorium ARM and Android Builds <img src="https://github.com/Alex313031/thorium/blob/main/logos/STAGING/arm_logo.png" alt="ARM" width="128">
 
 This directory contains build argument files for Android ARM32, ARM64, x86,
-and x64, Raspberry Pi ARM64, and Windows on ARM64. ARM ABI selection remains
+and x64, Raspberry Pi ARM64, Rockchip RK3568 ARM64, and Windows on ARM64. ARM ABI
+selection remains
 owned by Chromium's central build configuration; these files select the target
 and applicable product settings.
 
@@ -11,6 +12,10 @@ and applicable product settings.
   basis for `args.gn`. The patch series automatically selects the compatible
   V8 snapshot toolchain when this target is cross-built on Linux x64; no
   host-specific override belongs in the args file.
+- Rockchip RK3568 builds: use [`rk3568/rk3568_args.gn`](rk3568/rk3568_args.gn)
+  with the `--raspi` setup profile. The args file enables `is_rk3568` for
+  Cortex-A55 code-generation tuning while retaining Thorium's Linux ARM64
+  support files and compatibility configuration.
 - macOS ARM64 argument files are located in [`other/Mac`](../other/Mac).
 
 ## Prepare the source tree
@@ -94,6 +99,7 @@ gn ls out/thorium
 ```
 
 Use [`raspi/raspi_args.gn`](raspi/raspi_args.gn) for Raspberry Pi ARM64,
+[`rk3568/rk3568_args.gn`](rk3568/rk3568_args.gn) for Rockchip RK3568 ARM64,
 [`win_ARM_args.gn`](win_ARM_args.gn) for Windows on ARM64, or the appropriate
 file documented in [`android/README.md`](android/README.md) for Android.
 
@@ -104,7 +110,7 @@ configured output directory:
 ```shell
 cd /path/to/thorium
 
-# Raspberry Pi ARM64
+# Linux ARM64 (Raspberry Pi or RK3568)
 python3 build.py --expect-os linux --expect-cpu arm64
 
 # Windows on ARM64

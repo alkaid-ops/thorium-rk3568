@@ -1,0 +1,27 @@
+{
+  "custom_chrome_frame": true,
+  "homepage": "https://panel.yiniot.com/my-demo",
+  "homepage_is_newtabpage": false,
+  "show_home_button": true,
+  "net": { "network_prediction_options": 2 },
+  "performance_tuning": {
+    "high_efficiency_mode": {
+      "enabled": true,
+      "state": 1,
+      "aggressiveness": 0
+    }
+  },
+  "default_search_provider_data": {
+    "template_url_data": {
+      "keyword": "bing.com",
+      "short_name": "Bing",
+      "url": "https://www.bing.com/search?q={searchTerms}",
+      "suggestions_url": "https://www.bing.com/osjson.aspx?query={searchTerms}",
+      "favicon_url": "https://www.bing.com/favicon.ico",
+      "safe_for_autoreplace": true,
+      "date_created": "0",
+      "last_modified": "0",
+      "prepopulate_id": 3
+    }
+  }
+}
