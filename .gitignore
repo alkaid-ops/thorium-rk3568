@@ -32,3 +32,18 @@ Thorium_squashfs-root/
 # Python bytecode and cache directories.
 __pycache__/
 *.py[cod]
+
+# RK3568 local build workspace (Chromium checkout and toolchain are not tracked).
+/chromium/
+/depot_tools/
+/kept-out/
+/build-*.log
+/build-*.status
+/package-*.log
+/package-*.status
+/setup-*.log
+/version-sync-*.log
+/gclient-sync-*.log
+/build_detached.sh
+/package_detached.sh
+/rebuild_native_egl.sh

@@ -1,0 +1,332 @@
+diff --git a/media/base/media_switches.cc b/media/base/media_switches.cc
+index 9e219d53cad36..22ce92d503875 100644
+--- a/media/base/media_switches.cc
++++ b/media/base/media_switches.cc
+@@ -1,4 +1,4 @@
+-// Copyright 2012 The Chromium Authors
++// Copyright 2026 The Chromium Authors and Alex313031
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+@@ -386,6 +386,7 @@ BASE_FEATURE(kAutoPictureInPictureSurveys, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE(kAutoplayBypassForMicCamera, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Whether we should show a setting to disable autoplay policy.
++// TODO: Alex313031 Possibly re-disable? Causes Profile picker crash
+ BASE_FEATURE(kAutoplayDisableSettings, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // Enables the Enterprise Autoplay policies (AutoplayAllowed and
+@@ -549,7 +550,7 @@ BASE_FEATURE(kDocumentPictureInPictureReparenting,
+ BASE_FEATURE(kEnableRtcpReporting, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables user control over muting tab audio from the tab strip.
+-BASE_FEATURE(kEnableTabMuting, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kEnableTabMuting, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables tracking the occlusion of HW secure encrypted video elements.
+ // The HW secure check is OS agnostic, but this switch is currently only
+@@ -1199,7 +1200,7 @@ BASE_FEATURE(kOpenH264SoftwareEncoder, base::FEATURE_ENABLED_BY_DEFAULT);
+ // Otherwise, this feature has no effect and neither encrypted nor clear Dolby
+ // Vision is allowed.
+ BASE_FEATURE(kAllowClearDolbyVisionInMseWhenPlatformEncryptedDvEnabled,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables clear Dolby Vision playback through a pure MFT processor in the GPU
+ // process, working together with the D3D11 video decoder.
+@@ -1212,7 +1213,7 @@ BASE_FEATURE(kPlatformEncryptedDolbyVision,
+ #if BUILDFLAG(IS_WIN)
+              base::FEATURE_ENABLED_BY_DEFAULT
+ #else
+-             base::FEATURE_DISABLED_BY_DEFAULT
++             base::FEATURE_ENABLED_BY_DEFAULT
+ #endif
+ );
+ 
+@@ -1497,7 +1498,8 @@ BASE_FEATURE(kFuchsiaMediacodecVideoEncoder, base::FEATURE_DISABLED_BY_DEFAULT);
+ // on chromeos, but needs an experiment on linux.
+ BASE_FEATURE(kAcceleratedVideoDecodeLinux,
+              "AcceleratedVideoDecoder",
+-#if BUILDFLAG(USE_VAAPI)
++#if BUILDFLAG(USE_VAAPI) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_V4L2_CODEC))
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ #else
+              base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -1782,7 +1784,9 @@ std::string GetEffectiveAutoplayPolicy(const base::CommandLine& command_line) {
+     return command_line.GetSwitchValueASCII(switches::kAutoplayPolicy);
+   }
+ 
+-  if (base::FeatureList::IsEnabled(media::kUnifiedAutoplay)) {
++  if (command_line.HasSwitch("no-autoplay")) {
++    return switches::autoplay::kUserGestureRequiredPolicy;
++  } else if (base::FeatureList::IsEnabled(media::kUnifiedAutoplay)) {
+     return switches::autoplay::kDocumentUserActivationRequiredPolicy;
+   }
+ 
+diff --git a/media/gpu/sandbox/hardware_video_decoding_sandbox_hook_linux.cc b/media/gpu/sandbox/hardware_video_decoding_sandbox_hook_linux.cc
+index 37f44c9813db7..80264ba1a406a 100644
+--- a/media/gpu/sandbox/hardware_video_decoding_sandbox_hook_linux.cc
++++ b/media/gpu/sandbox/hardware_video_decoding_sandbox_hook_linux.cc
+@@ -7,6 +7,7 @@
+ #include <dlfcn.h>
+ #include <sys/stat.h>
+ 
++#include "base/logging.h"
+ #include "base/process/process_metrics.h"
+ #include "base/strings/stringprintf.h"
+ #include "build/build_config.h"
+@@ -199,6 +200,24 @@ bool HardwareVideoDecodingPreSandboxHookForV4L2(
+   static const char kDevImageProc0Path[] = "/dev/image-proc0";
+   permissions.push_back(BrokerFilePermission::ReadWrite(kDevImageProc0Path));
+ 
++  // Linux ARM SoCs (for example Rockchip) expose the stateful/stateless
++  // decoder as a plain /dev/videoN node with a companion media controller
++  // device (/dev/mediaN or a named alias) instead of the ChromeOS
++  // video-dec/media-dec aliases above. Grant access to the generic nodes so
++  // the out-of-process decoder can enumerate and open them.
++  static constexpr size_t MAX_V4L2_GENERIC_DEVICES = 256;
++  static constexpr size_t MAX_MEDIA_CONTROLLER_DEVICES = 10;
++  for (size_t i = 0; i < MAX_V4L2_GENERIC_DEVICES; i++) {
++    std::ostringstream videoPath;
++    videoPath << kDevicePath << "video" << i;
++    permissions.push_back(BrokerFilePermission::ReadWrite(videoPath.str()));
++  }
++  for (size_t i = 0; i < MAX_MEDIA_CONTROLLER_DEVICES; i++) {
++    std::ostringstream mediaPath;
++    mediaPath << kDevicePath << "media" << i;
++    permissions.push_back(BrokerFilePermission::ReadWrite(mediaPath.str()));
++  }
++
+   // Files needed for protected DMA allocations.
+   static const char kDmaHeapPath[] = "/dev/dma_heap/restricted_mtk_cma";
+   permissions.push_back(BrokerFilePermission::ReadWrite(kDmaHeapPath));
+diff --git a/media/gpu/v4l2/v4l2_video_decoder.cc b/media/gpu/v4l2/v4l2_video_decoder.cc
+index 2870e6f3b7164..d7353379540e4 100644
+--- a/media/gpu/v4l2/v4l2_video_decoder.cc
++++ b/media/gpu/v4l2/v4l2_video_decoder.cc
+@@ -1202,10 +1202,13 @@ CroStatus V4L2VideoDecoder::ContinueChangeResolution(
+   // If we don't use driver-allocated buffers, request as many as possible
+   // (VIDEO_MAX_FRAME) since they are shallow allocations. Otherwise, allocate
+   // |num_codec_reference_frames| plus one for the video frame being decoded,
+-  // and one for our client (presumably an ImageProcessor).
+-  const size_t v4l2_num_buffers = use_v4l2_allocated_buffers
+-                                      ? num_codec_reference_frames + 2
+-                                      : VIDEO_MAX_FRAME;
++  // and one for our client (presumably an ImageProcessor). Zero-copy clients
++  // can hold buffers across the compositor's frame lifetime, so keep a floor
++  // that matches what the validated Rockchip V4L2 configuration used.
++  const size_t v4l2_num_buffers =
++      use_v4l2_allocated_buffers
++          ? std::max<size_t>(num_codec_reference_frames + 2, 10)
++          : VIDEO_MAX_FRAME;
+ 
+   VLOGF(1) << "Requesting: " << v4l2_num_buffers << " CAPTURE buffers of type "
+            << (use_v4l2_allocated_buffers ? "V4L2_MEMORY_MMAP"
+diff --git a/media/media_options.gni b/media/media_options.gni
+index f3313ea467632..01ad3f179272a 100644
+--- a/media/media_options.gni
++++ b/media/media_options.gni
+@@ -19,7 +19,12 @@ is_cast_media_device = is_castos || is_cast_android
+ # accelerated video decoding) happen on utility processes for stability and
+ # security purposes. When |enable_oop_video_decoder| is true, code to use this
+ # feature is compiled.
+-enable_oop_video_decoder = is_chromeos && use_linux_video_acceleration
++# Linux V4L2 builds use the same sandboxed decoder: the platform decoder
++# interface (VideoDecoderPipeline) is shared, and running it out of the GPU
++# process keeps the driver interaction in a utility process.
++enable_oop_video_decoder =
++    (is_chromeos && use_linux_video_acceleration) ||
++    (is_linux && use_v4l2_codec)
+ 
+ declare_args() {
+   # Allows distributions to link pulseaudio directly (DT_NEEDED) instead of
+diff --git a/media/mojo/services/gpu_mojo_media_client_linux.cc b/media/mojo/services/gpu_mojo_media_client_linux.cc
+index 1694ea29dfccd..1eb768dbdb6c1 100644
+--- a/media/mojo/services/gpu_mojo_media_client_linux.cc
++++ b/media/mojo/services/gpu_mojo_media_client_linux.cc
+@@ -35,7 +35,14 @@ VideoDecoderType GetPreferredLinuxDecoderImplementation() {
+     return VideoDecoderType::kUnknown;
+   }
+ 
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++  // Linux V4L2 decoding runs in a sandboxed utility process, so the GPU-side
++  // client must report kOutOfProcess while the decoder process itself selects
++  // the concrete platform backend.
++  return VideoDecoderType::kOutOfProcess;
++#else
+   return ActiveLinuxVideoDecoderType();
++#endif
+ }
+ 
+ std::vector<Fourcc> GetPreferredRenderableFourccs(
+diff --git a/media/mojo/services/mojo_cdm_service_context.cc b/media/mojo/services/mojo_cdm_service_context.cc
+index 10d54cae5e779..51df818578c47 100644
+--- a/media/mojo/services/mojo_cdm_service_context.cc
++++ b/media/mojo/services/mojo_cdm_service_context.cc
+@@ -46,7 +46,7 @@ void MojoCdmServiceContext::UnregisterCdm(
+   cdm_services_.erase(cdm_id);
+ }
+ 
+-#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ base::UnguessableToken MojoCdmServiceContext::RegisterRemoteCdmContext(
+     chromeos::RemoteCdmContext* remote_context) {
+   DCHECK(remote_context);
+@@ -63,7 +63,7 @@ void MojoCdmServiceContext::UnregisterRemoteCdmContext(
+   DCHECK(remote_cdm_contexts_.count(cdm_id));
+   remote_cdm_contexts_.erase(cdm_id);
+ }
+-#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ 
+ std::unique_ptr<CdmContextRef> MojoCdmServiceContext::GetCdmContextRef(
+     const base::UnguessableToken& cdm_id) {
+@@ -81,12 +81,12 @@ std::unique_ptr<CdmContextRef> MojoCdmServiceContext::GetCdmContextRef(
+     }
+   }
+ 
+-#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+   // Try the remote contexts now.
+   auto remote_context = remote_cdm_contexts_.find(cdm_id);
+   if (remote_context != remote_cdm_contexts_.end())
+     return remote_context->second->GetCdmContextRef();
+-#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ 
+   LOG(ERROR) << "CdmContextRef cannot be obtained for CDM ID: " << cdm_id;
+   return nullptr;
+diff --git a/media/mojo/services/mojo_cdm_service_context.h b/media/mojo/services/mojo_cdm_service_context.h
+index ad130ec101d1b..5be79eb4fcde0 100644
+--- a/media/mojo/services/mojo_cdm_service_context.h
++++ b/media/mojo/services/mojo_cdm_service_context.h
+@@ -18,9 +18,9 @@
+ #include "media/media_buildflags.h"
+ #include "media/mojo/services/media_mojo_export.h"
+ 
+-#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ #include "chromeos/components/cdm_factory_daemon/remote_cdm_context.h"
+-#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ 
+ namespace media {
+ 
+@@ -43,7 +43,7 @@ class MEDIA_MOJO_EXPORT MojoCdmServiceContext {
+   // Unregisters the CDM. Must be called before the CDM is destroyed.
+   void UnregisterCdm(const base::UnguessableToken& cdm_id);
+ 
+-#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+   // Registers the |remote_context| and returns a unique (per-process) CDM ID.
+   // This is used with out-of-process video decoding with HWDRM. We run
+   // MojoCdmServiceContext in the GPU process which works with MojoCdmService.
+@@ -56,7 +56,7 @@ class MEDIA_MOJO_EXPORT MojoCdmServiceContext {
+   // Unregisters the RemoteCdmContext. Must be called before the
+   // RemoteCdmContext is destroyed.
+   void UnregisterRemoteCdmContext(const base::UnguessableToken& cdm_id);
+-#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ 
+   // Returns the CdmContextRef associated with |cdm_id|.
+   std::unique_ptr<CdmContextRef> GetCdmContextRef(
+@@ -70,12 +70,12 @@ class MEDIA_MOJO_EXPORT MojoCdmServiceContext {
+   std::map<base::UnguessableToken, raw_ptr<MojoCdmService, CtnExperimental>>
+       cdm_services_ GUARDED_BY(cdm_services_lock_);
+ 
+-#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+   // A map between CDM ID and RemoteCdmContext.
+   std::map<base::UnguessableToken,
+            raw_ptr<chromeos::RemoteCdmContext, CtnExperimental>>
+       remote_cdm_contexts_;
+-#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
++#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(IS_CHROMEOS)
+ };
+ 
+ }  // namespace media
+diff --git a/ui/ozone/platform/x11/x11_surface_factory.cc b/ui/ozone/platform/x11/x11_surface_factory.cc
+index 07dd8200a4bf4..f35bdec93629b 100644
+--- a/ui/ozone/platform/x11/x11_surface_factory.cc
++++ b/ui/ozone/platform/x11/x11_surface_factory.cc
+@@ -176,6 +176,9 @@ std::vector<gl::GLImplementationParts>
+ X11SurfaceFactory::GetAllowedGLImplementations() {
+   return std::vector<gl::GLImplementationParts>{
+       gl::GLImplementationParts(gl::kGLImplementationEGLANGLE),
++      // Allow native EGL/GLES for Linux ARM devices whose Mesa EGL exposes
++      // EGL_EXT_image_dma_buf_import (needed for V4L2 NV12 zero-copy import).
++      gl::GLImplementationParts(gl::kGLImplementationEGLGLES2),
+   };
+ }
+ 
+@@ -183,6 +186,7 @@ GLOzone* X11SurfaceFactory::GetGLOzone(
+     const gl::GLImplementationParts& implementation) {
+   switch (implementation.gl) {
+     case gl::kGLImplementationEGLANGLE:
++    case gl::kGLImplementationEGLGLES2:
+       return egl_implementation_.get();
+     default:
+       return nullptr;
+@@ -236,7 +240,14 @@ scoped_refptr<gfx::NativePixmap> X11SurfaceFactory::CreateNativePixmap(
+ 
+ bool X11SurfaceFactory::CanCreateNativePixmapForFormat(
+     viz::SharedImageFormat format) {
+-  return ui::GBMSupportX11::GetInstance()->CanCreateBufferForFormat(format);
++  if (ui::GBMSupportX11::GetInstance()->CanCreateBufferForFormat(format)) {
++    return true;
++  }
++  // GBM on some ARM SoCs cannot allocate multi-plane formats, but buffers are
++  // still importable when they come from a DMA-BUF handle (V4L2 decoder
++  // output). Accept those formats so SharedImageFactory can use the
++  // CreateNativePixmapFromHandle path.
++  return egl_implementation_->CanImportNativePixmap(format);
+ }
+ 
+ scoped_refptr<gfx::NativePixmap>
+@@ -246,22 +257,37 @@ X11SurfaceFactory::CreateNativePixmapFromHandle(
+     viz::SharedImageFormat format,
+     gfx::NativePixmapHandle handle) {
+   scoped_refptr<gfx::NativePixmapDmaBuf> pixmap;
+-  auto buffer = ui::GBMSupportX11::GetInstance()->CreateBufferFromHandle(
+-      size, format, std::move(handle));
+-  if (buffer) {
+-    gfx::NativePixmapHandle buffer_handle = buffer->ExportHandle();
+-    if (buffer_handle.planes.empty()) {
+-      return nullptr;
++  if (ui::GBMSupportX11::GetInstance()->CanCreateBufferForFormat(format)) {
++    auto buffer = ui::GBMSupportX11::GetInstance()->CreateBufferFromHandle(
++        size, format, std::move(handle));
++    if (buffer) {
++      gfx::NativePixmapHandle buffer_handle = buffer->ExportHandle();
++      if (buffer_handle.planes.empty()) {
++        return nullptr;
++      }
++      pixmap = base::MakeRefCounted<gfx::NativePixmapDmaBuf>(
++          size, format, std::move(buffer_handle));
+     }
++  } else if (!handle.planes.empty()) {
++    // The GBM device cannot import this format (multi-plane NV12/P010 on
++    // Rockchip/Panfrost). Wrap the DMA-BUF planes directly; native EGL imports
++    // them without a GBM buffer.
+     pixmap = base::MakeRefCounted<gfx::NativePixmapDmaBuf>(
+-        size, format, std::move(buffer_handle));
++        size, format, std::move(handle));
+   }
+   return pixmap;
+ }
+ 
+ bool X11SurfaceFactory::IsFormatSupportedForTexturing(
+     viz::SharedImageFormat format) const {
+-  return ui::GBMSupportX11::GetInstance()->CanCreateBufferForFormat(format);
++  if (ui::GBMSupportX11::GetInstance()->CanCreateBufferForFormat(format)) {
++    return true;
++  }
++  // Multi-plane formats such as NV12/P010 are imported directly through native
++  // EGL on platforms whose GBM device cannot allocate them (for example
++  // Rockchip/Panfrost). Keep allocation and texturing paths separate so that
++  // such buffers can still be imported from an existing DMA-BUF handle.
++  return egl_implementation_->CanImportNativePixmap(format);
+ }
+ 
+ }  // namespace ui

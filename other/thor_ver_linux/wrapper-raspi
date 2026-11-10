@@ -84,6 +84,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Rockchip RK3568 defaults: Mesa/Panfrost's native EGL implementation is
+# required for V4L2 NV12 DMA-BUF import; ANGLE's GLES backend does not expose
+# EGL_EXT_image_dma_buf_import to Chromium on this platform. Keep these before
+# the user flags file so explicit user options still win.
+CHROME_USER_FLAGS=""
+if [[ -e /dev/video-rkvdec ]]; then
+  CHROME_USER_FLAGS="--use-gl=egl"
+fi
+
 # Allow users to override command-line options with a file.
 if [[ -f $XDG_CONFIG_HOME/thorium/thorium-flags.conf ]]; then
    CHROME_USER_FLAGS="$(cat $XDG_CONFIG_HOME/thorium/thorium-flags.conf)"

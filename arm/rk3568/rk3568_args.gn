@@ -1,11 +1,10 @@
 # Linux ARM64 build for Rockchip RK3568 (Cortex-A55).
 # Keep is_raspi=true to select Thorium's reviewed ARM64 Linux configuration.
-# is_rk3568 selects Cortex-A55 compiler tuning without changing the ARM64 baseline.
+# RK3568 has no VA-API driver, so use the V4L2 (rkvdec) decoder only.
 target_os = "linux"
 target_cpu = "arm64"
 v8_target_cpu = "arm64"
 is_raspi = true
-is_rk3568 = true
 angle_enable_vulkan = false
 enable_swiftshader_vulkan = false
 enable_linux_installer = true
@@ -44,7 +43,11 @@ ffmpeg_branding = "Chrome"
 clang_use_chrome_plugins = true
 enable_ffmpeg_video_decoders = true
 is_component_ffmpeg = false
-use_vaapi = true
+# V4L2-only: rkvdec exposes stateful (H264/HEVC/VP8/VP9) and stateless
+# (S264/S265/VP8F/VP9F) decoders through the media-controller request API.
+use_vaapi = false
+# Use_v4l2_codec also enables enable_oop_video_decoder in media_options.gni.
+use_v4l2_codec = true
 enable_library_cdms = true
 enable_widevine = true
 bundle_widevine_cdm = false
@@ -72,3 +75,6 @@ use_thin_lto = true
 thin_lto_enable_optimizations = true
 enable_rust = true
 chrome_pgo_phase = 0
+
+# Native Panfrost EGL on RK3568 needs the validating command decoder.
+enable_validating_command_decoder = true

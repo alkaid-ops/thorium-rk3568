@@ -13,9 +13,9 @@ and applicable product settings.
   V8 snapshot toolchain when this target is cross-built on Linux x64; no
   host-specific override belongs in the args file.
 - Rockchip RK3568 builds: use [`rk3568/rk3568_args.gn`](rk3568/rk3568_args.gn)
-  with the `--raspi` setup profile. The args file enables `is_rk3568` for
-  Cortex-A55 code-generation tuning while retaining Thorium's Linux ARM64
-  support files and compatibility configuration.
+  with the `--raspi` setup profile. The args file selects the V4L2 decoder
+  instead of VA-API while retaining Thorium's Linux ARM64 support files and
+  compatibility configuration.
 - macOS ARM64 argument files are located in [`other/Mac`](../other/Mac).
 
 ## Prepare the source tree
