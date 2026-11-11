@@ -1,3 +1,51 @@
+diff --git a/components/viz/common/frame_sinks/delay_based_time_source.cc b/components/viz/common/frame_sinks/delay_based_time_source.cc
+index 19b7132b9fca8..10e0c18b58342 100644
+--- a/components/viz/common/frame_sinks/delay_based_time_source.cc
++++ b/components/viz/common/frame_sinks/delay_based_time_source.cc
+@@ -10,6 +10,7 @@
+ #include <string>
+ 
+ #include "base/check_op.h"
++#include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/location.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -21,6 +22,17 @@
+ 
+ namespace viz {
+ 
++namespace {
++// Arm the begin-frame timer slightly before the target grid point so scheduler
++// wake-up latency does not turn into a missed vsync (which shows up as a
++// dropped video frame). The reported grid (|next_tick_time_|) is unchanged.
++BASE_FEATURE(kBeginFrameTickLead,
++             "BeginFrameTickLead",
++             base::FEATURE_ENABLED_BY_DEFAULT);
++const base::FeatureParam<int> kBeginFrameTickLeadUs{&kBeginFrameTickLead,
++                                                    "lead_us", 3000};
++}  // namespace
++
+ // The following methods correspond to the DelayBasedTimeSource that uses
+ // the base::TimeTicks::Now as the timebase.
+ DelayBasedTimeSource::DelayBasedTimeSource(
+@@ -169,7 +181,16 @@ void DelayBasedTimeSource::PostNextTickTask(base::TimeTicks now) {
+     }
+ 
+     DCHECK_GT(next_tick_time_, now);
+-    timer_.Start(FROM_HERE, next_tick_time_, tick_closure_,
++    base::TimeTicks timer_target = next_tick_time_;
++    if (base::FeatureList::IsEnabled(kBeginFrameTickLead)) {
++      const base::TimeDelta lead =
++          base::Microseconds(kBeginFrameTickLeadUs.Get());
++      // Never schedule in the past; keep a small floor so a late tick does not
++      // collapse into an immediate retry.
++      timer_target = std::max(now + base::Microseconds(100),
++                              next_tick_time_ - lead);
++    }
++    timer_.Start(FROM_HERE, timer_target, tick_closure_,
+                  base::subtle::DelayPolicy::kPrecise);
+   }
+ }
 diff --git a/media/base/media_switches.cc b/media/base/media_switches.cc
 index 9e219d53cad36..22ce92d503875 100644
 --- a/media/base/media_switches.cc
@@ -246,6 +294,225 @@ index ad130ec101d1b..5be79eb4fcde0 100644
  };
  
  }  // namespace media
+diff --git a/third_party/blink/renderer/platform/graphics/video_frame_submitter.cc b/third_party/blink/renderer/platform/graphics/video_frame_submitter.cc
+index 56f7bfc9a087e..b145ea8a72098 100644
+--- a/third_party/blink/renderer/platform/graphics/video_frame_submitter.cc
++++ b/third_party/blink/renderer/platform/graphics/video_frame_submitter.cc
+@@ -815,7 +815,12 @@ bool VideoFrameSubmitter::SubmitFrame(
+ 
+   // We can't delay frame size changes even if we have a pending compositor ACK
+   // because a relayout signal is already in flight on the main thread.
+-  if (waiting_for_compositor_ack_ > 0 && !frame_size_changed) {
++  // Allow more than one frame to be in flight: a scheduling hiccup can make the
++  // renderer produce two frames for adjacent BeginFrames, and rejecting the
++  // second one makes the compositor count the frame as dropped.
++  static constexpr int kMaxFramesWaitingForAck = 2;
++  if (waiting_for_compositor_ack_ >= kMaxFramesWaitingForAck &&
++      !frame_size_changed) {
+     return false;
+   }
+ 
+diff --git a/ui/display/display_features.cc b/ui/display/display_features.cc
+index 7af0d91582175..8a8e21e30bc4b 100644
+--- a/ui/display/display_features.cc
++++ b/ui/display/display_features.cc
+@@ -31,7 +31,10 @@ BASE_FEATURE(kUseHDRTransferFunction,
+ // Enables using HDR10(PQ) mode if the monitor says it supports it.
+ BASE_FEATURE(kEnableExternalDisplayHDR10Mode,
+              base::FEATURE_DISABLED_BY_DEFAULT);
++#endif
+ 
++// Also needed by the Linux DRM/KMS ozone platform (RK3568 direct scanout).
++#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
+ // Feature to control if the CTM is dynamically set to the primary transform
+ // from plane color space to output color space.
+ BASE_FEATURE(kCtmColorManagement, base::FEATURE_ENABLED_BY_DEFAULT);
+diff --git a/ui/display/display_features.h b/ui/display/display_features.h
+index 9a23e67a16aea..abe74f4866b37 100644
+--- a/ui/display/display_features.h
++++ b/ui/display/display_features.h
+@@ -23,7 +23,10 @@ BASE_DECLARE_FEATURE(kUseHDRTransferFunction);
+ 
+ COMPONENT_EXPORT(DISPLAY_FEATURES)
+ BASE_DECLARE_FEATURE(kEnableExternalDisplayHDR10Mode);
++#endif
+ 
++// Also needed by the Linux DRM/KMS ozone platform (RK3568 direct scanout).
++#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
+ COMPONENT_EXPORT(DISPLAY_FEATURES)
+ BASE_DECLARE_FEATURE(kCtmColorManagement);
+ 
+diff --git a/ui/ozone/platform/drm/BUILD.gn b/ui/ozone/platform/drm/BUILD.gn
+index bf07dc3607f4b..0a9aa13bb18d0 100644
+--- a/ui/ozone/platform/drm/BUILD.gn
++++ b/ui/ozone/platform/drm/BUILD.gn
+@@ -10,8 +10,9 @@ import("//gpu/vulkan/features.gni")
+ import("//testing/test.gni")
+ import("//ui/gl/features.gni")
+ 
+-# This is ChromeOS-only.
+-assert(is_chromeos, "Ozone DRM platform is ChromeOS-only")
++# Upstream this is ChromeOS-only; RK3568 enables it on Linux for KMS
++# direct-scanout (video plane overlay).
++assert(is_chromeos || is_linux, "Ozone DRM platform is ChromeOS/Linux-only")
+ assert(!is_castos, "Ozone DRM platform no longer supports CastOS")
+ 
+ visibility = [ "//ui/ozone/*" ]
+@@ -161,10 +162,12 @@ source_set("gbm") {
+     "//ui/platform_window",
+   ]
+ 
+-  deps += [
+-    "//ash/constants",
+-    "//ui/base/ime/ash",
+-  ]
++  if (is_chromeos) {
++    deps += [
++      "//ash/constants",
++      "//ui/base/ime/ash",
++    ]
++  }
+ 
+   if (!use_static_angle || is_chromeos) {
+     data_deps = [
+diff --git a/ui/ozone/platform/drm/gpu/drm_thread_proxy.cc b/ui/ozone/platform/drm/gpu/drm_thread_proxy.cc
+index 2a1b4e5e0e88a..4c8e4ea15cb12 100644
+--- a/ui/ozone/platform/drm/gpu/drm_thread_proxy.cc
++++ b/ui/ozone/platform/drm/gpu/drm_thread_proxy.cc
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/thread_restrictions.h"
+ #include "base/time/time.h"
+diff --git a/ui/ozone/platform/drm/gpu/gbm_surface_factory.cc b/ui/ozone/platform/drm/gpu/gbm_surface_factory.cc
+index 3d762d4eb73e1..b2d947539f264 100644
+--- a/ui/ozone/platform/drm/gpu/gbm_surface_factory.cc
++++ b/ui/ozone/platform/drm/gpu/gbm_surface_factory.cc
+@@ -508,6 +508,16 @@ bool GbmSurfaceFactory::IsFormatSupportedForTexturing(
+       return true;
+     }
+   }
++
++  // Multi-plane formats such as NV12/P010 are often not allocatable by the GBM
++  // device on platforms like Rockchip/Panfrost, but an existing DMA-BUF in that
++  // format can still be imported and sampled through native EGL.
++  auto* display = gl::GLSurfaceEGL::GetGLDisplayEGL();
++  if (display && display->ext &&
++      display->ext->b_EGL_EXT_image_dma_buf_import) {
++    return NativePixmapEGLBinding::IsSharedImageFormatSupported(format);
++  }
++
+   return false;
+ }
+ 
+diff --git a/ui/ozone/platform/drm/gpu/page_flip_watchdog.cc b/ui/ozone/platform/drm/gpu/page_flip_watchdog.cc
+index 260728cff86f9..b823d978f44cd 100644
+--- a/ui/ozone/platform/drm/gpu/page_flip_watchdog.cc
++++ b/ui/ozone/platform/drm/gpu/page_flip_watchdog.cc
+@@ -6,7 +6,9 @@
+ 
+ #include <cstdint>
+ 
++#if BUILDFLAG(IS_CHROMEOS)
+ #include "ash/constants/ash_switches.h"
++#endif
+ #include "base/containers/ring_buffer.h"
+ #include "base/logging.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -15,9 +17,13 @@
+ namespace ui {
+ 
+ PageFlipWatchdog::PageFlipWatchdog() {
++#if BUILDFLAG(IS_CHROMEOS)
+   plane_assignment_flake_threshold = ash::switches::IsRevenBranding()
+                                          ? kFlexPlaneAssignmentFlakeThreshold
+                                          : kPlaneAssignmentFlakeThreshold;
++#else
++  plane_assignment_flake_threshold = kPlaneAssignmentFlakeThreshold;
++#endif
+ }
+ 
+ PageFlipWatchdog::~PageFlipWatchdog() = default;
+@@ -50,9 +56,11 @@ void PageFlipWatchdog::CrashOnFailedPlaneAssignment() {
+ 
+   // Metric to find good threshold for Flex device.
+   // TODO(crbug.com/371609830): finalize this threshold.
++#if BUILDFLAG(IS_CHROMEOS)
+   if (ash::switches::IsRevenBranding()) {
+     base::UmaHistogramCounts100("Platform.FlexPageFlipFlakes2", flakes);
+   }
++#endif
+ 
+   if (flakes >= plane_assignment_flake_threshold) {
+     LOG(FATAL) << "Plane assignment has flaked " << flakes
+diff --git a/ui/ozone/platform/drm/host/drm_cursor.cc b/ui/ozone/platform/drm/host/drm_cursor.cc
+index 3204aebb3a2e3..5c2d63ba429f7 100644
+--- a/ui/ozone/platform/drm/host/drm_cursor.cc
++++ b/ui/ozone/platform/drm/host/drm_cursor.cc
+@@ -13,13 +13,18 @@
+ #include "base/threading/thread_checker.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
++#include "build/build_config.h"
+ #include "ui/base/cursor/mojom/cursor_type.mojom.h"
+ #include "ui/gfx/geometry/point_conversions.h"
+ #include "ui/ozone/common/bitmap_cursor.h"
+ #include "ui/ozone/platform/drm/host/drm_window_host.h"
+ #include "ui/ozone/platform/drm/host/drm_window_host_manager.h"
+ 
++#if BUILDFLAG(IS_CHROMEOS)
++// Cursor scaling/touchpad settings live in ChromeOS-only code; plain Linux
++// ozone/drm has no such controller, so the delta is used as-is there.
+ #include "ui/events/ozone/chromeos/cursor_controller.h"
++#endif
+ 
+ namespace ui {
+ namespace {
+@@ -232,8 +237,10 @@ void DrmCursor::MoveCursor(const gfx::Vector2dF& delta) {
+     return;
+ 
+   gfx::Vector2dF transformed_delta = delta;
++#if BUILDFLAG(IS_CHROMEOS)
+   ui::CursorController::GetInstance()->ApplyCursorConfigForWindow(
+       window_, &transformed_delta);
++#endif
+   SetCursorLocationLocked(location_ + transformed_delta);
+   SendCursorMoveLocked();
+ }
+diff --git a/ui/ozone/platform/drm/ozone_platform_drm.cc b/ui/ozone/platform/drm/ozone_platform_drm.cc
+index d174dbe968878..dabe601ed4f92 100644
+--- a/ui/ozone/platform/drm/ozone_platform_drm.cc
++++ b/ui/ozone/platform/drm/ozone_platform_drm.cc
+@@ -60,7 +60,11 @@
+ #include "ui/events/ozone/layout/stub/stub_keyboard_layout_engine.h"
+ #endif
+ 
++#if BUILDFLAG(IS_CHROMEOS)
+ #include "ui/base/ime/ash/input_method_ash.h"
++#else
++#include "ui/base/ime/input_method_minimal.h"
++#endif
+ 
+ namespace ui {
+ 
+@@ -170,7 +174,13 @@ class OzonePlatformDrm : public OzonePlatform {
+   std::unique_ptr<InputMethod> CreateInputMethod(
+       ImeKeyEventDispatcher* ime_key_event_dispatcher,
+       gfx::AcceleratedWidget) override {
+-    return std::make_unique<ash::InputMethodAsh>(ime_key_event_dispatcher);
++    return std::make_unique<
++#if BUILDFLAG(IS_CHROMEOS)
++        ash::InputMethodAsh
++#else
++        InputMethodMinimal
++#endif
++        >(ime_key_event_dispatcher);
+   }
+ 
+   bool IsNativePixmapConfigSupported(viz::SharedImageFormat format,
 diff --git a/ui/ozone/platform/x11/x11_surface_factory.cc b/ui/ozone/platform/x11/x11_surface_factory.cc
 index 07dd8200a4bf4..f35bdec93629b 100644
 --- a/ui/ozone/platform/x11/x11_surface_factory.cc
